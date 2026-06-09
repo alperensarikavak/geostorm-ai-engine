@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Any
 
 import pika
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
+from fastapi.middleware.cors import CORSMiddleware
 from google import genai
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -40,7 +41,20 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-app = FastAPI(title="GeoStorm AI Insight Engine")
+app = FastAPI(title="GeoStorm AI Insight Engine", redirect_slashes=True)
+
+origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 class InsightRequest(BaseModel):
@@ -280,7 +294,14 @@ def publish_to_rabbitmq(message: dict[str, str]) -> bool:
             connection.close()
 
 
+@app.options("/api/v1/insight", include_in_schema=False)
+@app.options("/api/v1/insight/", include_in_schema=False)
+async def insight_options():
+    return Response(status_code=204)
+
+
 @app.post("/api/v1/insight", response_model=InsightResponse)
+@app.post("/api/v1/insight/", response_model=InsightResponse, include_in_schema=False)
 async def get_insight(request: InsightRequest):
     try:
         mcp_data = await fetch_mcp_data()
