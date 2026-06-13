@@ -129,6 +129,17 @@ def empty_context(error_message: str) -> dict[str, Any]:
         },
         "noaa_swpc_alerts": [],
         "nasa_donki_cmes": [],
+        "esa_source_status": "unavailable",
+        "esa_data_json": "[]",
+        "esa_dataset_id": "",
+        "esa_error": error_message,
+        "esa_summary": {
+            "source": "ESA SWE HAPI",
+            "status": "unavailable",
+            "dataset_id": "",
+            "record_count": 0,
+            "error": error_message,
+        },
         "risk_signals": {
             "has_noaa_alerts": False,
             "cme_count": 0,
@@ -187,6 +198,7 @@ def context_from_grpc_response(response: Any) -> dict[str, Any]:
     errors = list(getattr(response, "errors", []))
     noaa_alerts, noaa_error = parse_json_field(response.noaa_swpc_alerts_json, [])
     nasa_cmes, nasa_error = parse_json_field(response.nasa_donki_cmes_json, [])
+    esa_data, esa_json_error = parse_json_field(getattr(response, "esa_data_json", "[]"), [])
     risk_signals, risk_error = parse_json_field(
         response.risk_signals_json,
         {
@@ -196,9 +208,15 @@ def context_from_grpc_response(response: Any) -> dict[str, Any]:
         },
     )
 
-    for error in (noaa_error, nasa_error, risk_error):
+    esa_source_status = getattr(response, "esa_source_status", "") or "disabled"
+    esa_dataset_id = getattr(response, "esa_dataset_id", "") or ""
+    esa_error = getattr(response, "esa_error", "") or ""
+
+    for error in (noaa_error, nasa_error, esa_json_error, risk_error):
         if error:
             errors.append(error)
+    if esa_error and esa_source_status not in {"disabled", "ok"}:
+        errors.append(esa_error)
 
     return {
         "source": response.source or "geostorm-mcp-server",
@@ -209,6 +227,11 @@ def context_from_grpc_response(response: Any) -> dict[str, Any]:
         },
         "noaa_swpc_alerts": noaa_alerts,
         "nasa_donki_cmes": nasa_cmes,
+        "esa_source_status": esa_source_status,
+        "esa_data_json": json.dumps(esa_data, ensure_ascii=False),
+        "esa_dataset_id": esa_dataset_id,
+        "esa_error": esa_error,
+        "esa_summary": summarize_esa_context(esa_source_status, esa_dataset_id, esa_data, esa_error),
         "risk_signals": risk_signals,
         "errors": errors,
     }
@@ -223,6 +246,22 @@ def parse_json_field(value: str, fallback: Any) -> tuple[Any, str | None]:
 
 def context_as_prompt_json(context: dict[str, Any]) -> str:
     return json.dumps(context, ensure_ascii=False, indent=2)
+
+
+def summarize_esa_context(
+    status: str,
+    dataset_id: str,
+    esa_data: Any,
+    error: str,
+) -> dict[str, Any]:
+    records = esa_data if isinstance(esa_data, list) else []
+    return {
+        "source": "ESA SWE HAPI",
+        "status": status or "disabled",
+        "dataset_id": dataset_id,
+        "record_count": len(records),
+        "error": error,
+    }
 
 
 def generate_fallback_summary(prompt: str, context: dict[str, Any], reason: str) -> str:
@@ -249,10 +288,12 @@ async def generate_llm_summary(prompt: str, context: dict[str, Any]) -> str:
 
     system_prompt = (
         "You are a senior space-weather operations analyst. Interpret NASA DONKI "
-        "CME records and NOAA SWPC alerts from the provided JSON telemetry. "
+        "CME records, NOAA SWPC alerts, and optional ESA SWE/HAPI supplementary "
+        "context from the provided JSON telemetry. "
         "Answer clearly, summarize operational implications, and do not invent "
         "risk tiers that conflict with the provided canonical risk classification. "
         "Distinguish current observed risk from forecast/watch risk. "
+        "ESA data is supplementary and must not override the canonical risk basis. "
         "Do not include raw JSON in the final answer."
     )
     risk_profile = build_risk_profile(context)
@@ -486,7 +527,7 @@ def build_alert_event(
     risk_profile: dict[str, str],
     timestamp: str,
 ) -> dict[str, str]:
-    return {
+    event = {
         "schema_version": "1.0",
         "event_id": analysis_id,
         "activity_id": extract_activity_id(context),
@@ -497,6 +538,13 @@ def build_alert_event(
         "details": summary,
         "timestamp": timestamp,
     }
+
+    for key in ("esa_source_status", "esa_dataset_id", "esa_error"):
+        value = context.get(key)
+        if isinstance(value, str) and value.strip():
+            event[key] = value.strip()
+
+    return event
 
 
 def publish_to_rabbitmq_sync(message: dict[str, str]) -> bool:
