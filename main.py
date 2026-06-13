@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     rabbitmq_user: str = "guest"
     rabbitmq_password: str = "guest"
     rabbitmq_timeout_seconds: float = 5.0
+    cors_allowed_origins: str = ""
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
     prompt_max_length: int = 2000
 
@@ -49,10 +50,12 @@ settings = Settings()
 
 app = FastAPI(title="GeoStorm AI Insight Engine", redirect_slashes=True)
 
+configured_cors_origins = settings.cors_allowed_origins or settings.cors_origins
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        origin.strip() for origin in settings.cors_origins.split(",") if origin.strip()
+        origin.strip() for origin in configured_cors_origins.split(",") if origin.strip()
     ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
@@ -435,13 +438,36 @@ async def ready():
         except Exception:
             mcp_ready = False
 
+    openrouter_configured = is_configured_value(settings.openrouter_api_key)
+    rabbitmq_configured = all(
+        [
+            settings.rabbitmq_host,
+            settings.rabbitmq_port,
+            settings.rabbitmq_user,
+            is_configured_value(settings.rabbitmq_password),
+        ]
+    )
+    checks = {
+        "openrouter_api_key_configured": openrouter_configured,
+        "mcp_transport": settings.mcp_transport.lower(),
+        "mcp_grpc_target": f"{settings.mcp_grpc_host}:{settings.mcp_grpc_port}",
+        "mcp_reachable": mcp_ready,
+        "rabbitmq_configured": rabbitmq_configured,
+    }
+
     return {
-        "status": "ready" if mcp_ready else "degraded",
+        "status": "ready" if mcp_ready and openrouter_configured and rabbitmq_configured else "degraded",
         "service": "geostorm-ai-engine",
+        "checks": checks,
         "mcp_reachable": mcp_ready,
         "mcp_transport": settings.mcp_transport.lower(),
-        "openrouter_configured": bool(settings.openrouter_api_key.strip()),
+        "openrouter_configured": openrouter_configured,
     }
+
+
+def is_configured_value(value: str) -> bool:
+    normalized = value.strip()
+    return bool(normalized and normalized not in {"replace_me", "REPLACE_ME"})
 
 
 def check_mcp_grpc_health() -> bool:
